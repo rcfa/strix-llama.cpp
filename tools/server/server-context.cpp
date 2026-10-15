@@ -1232,6 +1232,26 @@ private:
 
     int64_t t_last_load_progress_ms = 0;
 
+    // on a clean exit: a running request ends with the server, so only idle slots are saved
+    void save_slots_to_cache() {
+        if (sleeping || !prompt_cache || prompt_cache->cache_dir.empty()) {
+            return;
+        }
+        int n_saved = 0;
+        size_t n_tokens = 0;
+        for (auto & slot : slots) {
+            if (slot.is_processing() || slot.prompt.tokens.empty()) {
+                continue;
+            }
+            if (slot.prompt_save(*prompt_cache)) {
+                n_saved++;
+                n_tokens += slot.prompt.tokens.size();
+            }
+        }
+        prompt_cache->update();
+        SRV_INF("saved %d idle slot(s) (%zu tokens) to the disk prompt cache before exit\n", n_saved, n_tokens);
+    }
+
     void destroy() {
         spec.reset();
 
@@ -5512,6 +5532,10 @@ void server_context::start_loop() {
 
 void server_context::terminate() {
     impl->queue_tasks.terminate();
+}
+
+void server_context::save_slots_to_cache() {
+    impl->save_slots_to_cache();
 }
 
 llama_context * server_context::get_llama_context() const {
