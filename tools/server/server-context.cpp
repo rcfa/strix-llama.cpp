@@ -77,8 +77,11 @@ static std::string server_prompt_cache_key(
         const llama_context * ctx_tgt,
         const llama_context * ctx_dft) {
     std::ostringstream key;
-    key << "format=1\n";
-    key << "commit=" << llama_commit() << "\n";
+    // the state format, not the build commit: entries survive an upgrade (a build that changes the state layout
+    // bumps LLAMA_STATE_SEQ_VERSION / LLAMA_SESSION_VERSION, and llama_state_seq_set_data checks the sizes)
+    key << "format=2\n";
+    key << "state_seq_version=" << LLAMA_STATE_SEQ_VERSION << "\n";
+    key << "session_version=" << LLAMA_SESSION_VERSION << "\n";
     server_prompt_cache_key_add_file(key, "model", params.model.path);
     server_prompt_cache_key_add_file(key, "draft", params.speculative.draft.mparams.path);
     server_prompt_cache_key_add_file(key, "mmproj", params.mmproj.path);
