@@ -100,6 +100,10 @@ struct server_context {
     // terminate main loop (will unblock start_loop)
     void terminate();
 
+    // after start_loop() returned: with a disk prompt cache, save the idle slots to it so that a restart can resume
+    // their conversations; the cache keeps them under its size limit and evicts the oldest first
+    void save_slots_to_cache();
+
     // get the underlaying llama_context, can return nullptr if sleeping
     // not thread-safe, should only be used from the main thread
     llama_context * get_llama_context() const;

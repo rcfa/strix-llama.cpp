@@ -549,6 +549,7 @@ int llama_server(common_params & params, int argc, char ** argv, server_child & 
         // this call blocks the main thread until queue_tasks.terminate() is called
         ctx_server.start_loop();
 
+        ctx_server.save_slots_to_cache();
         clean_up();
         ctx_http.join();
         if (monitor_thread.joinable()) {
