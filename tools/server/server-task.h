@@ -145,6 +145,11 @@ struct server_task {
     int id_target = -1;
     int id_slot   = -1;
 
+    // slot choice hints: a shared prefix (system prompt, tools) that is no evidence of a conversation, and the
+    // conversation's id, which brings it back to the slot it used last
+    int32_t     slot_match_skip = 0;
+    std::string conversation_id;
+
     // used by parallel sampling (multiple completions from same prompt)
     int id_parent  = -1;
     // temporary store of child tasks for scheduling
@@ -284,6 +289,7 @@ struct server_task {
         copy.type      = type;
         copy.tokens    = tokens.clone();
         copy.id_slot   = -1; // child tasks cannot specify slot
+        copy.conversation_id.clear();
 
         // use different sampling seed for each child
         // note: https://github.com/ggml-org/llama.cpp/pull/18700#discussion_r2675115723
