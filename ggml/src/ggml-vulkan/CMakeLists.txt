@@ -126,6 +126,12 @@ if (Vulkan_FOUND)
     )
 
     target_link_libraries(ggml-vulkan PRIVATE Vulkan::Vulkan SPIRV-Headers::SPIRV-Headers)
+
+    # EXL3 (exllamav3) linears, see ggml/exl3/README.md
+    if (GGML_EXL3)
+        target_compile_definitions(ggml-vulkan PRIVATE GGML_USE_EXL3)
+    endif()
+
     target_include_directories(ggml-vulkan PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
     # Workaround to the "can't dereference invalidated vector iterator" bug in clang-cl debug build
