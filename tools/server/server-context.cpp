@@ -362,6 +362,9 @@ struct server_slot {
     // used to determine the slot that has been used the longest
     int64_t t_last_used = -1;
 
+    // the conversation_id of the request that left the slot's tokens, empty if unknown
+    std::string conversation_id;
+
     // generation props
     int32_t n_ctx   = 0;  // context size per slot
     int32_t n_keep  = 0;
@@ -464,6 +467,7 @@ struct server_slot {
         }
 
         prompt.clear();
+        conversation_id.clear();
     }
 
     std::vector<common_adapter_lora_info> lora;
@@ -881,6 +885,10 @@ struct server_slot {
             {"is_processing", is_processing()},
         };
 
+        if (!conversation_id.empty()) {
+            res["conversation_id"] = conversation_id;
+        }
+
         const auto & ptask = task ? task : task_prev;
 
         if (ptask) {
@@ -1226,6 +1234,7 @@ private:
 
     // Necessary similarity of prompt for slot selection
     float slot_prompt_similarity = 0.0f;
+    float slot_keep_min          = 0.0f;
 
     std::string model_name; // name of the loaded model, to be used by API
     std::set<std::string> model_aliases; // additional names for the model
@@ -1720,6 +1729,7 @@ private:
 
         // Necessary similarity of prompt for slot selection
         slot_prompt_similarity = params_base.slot_prompt_similarity;
+        slot_keep_min          = params_base.slot_keep_min;
 
         const int n_ctx_train = llama_model_n_ctx_train(model_tgt);
 
@@ -2138,9 +2148,31 @@ private:
             }
         }
 
+        // the slot this conversation used last, if it is idle and still holds it
+        bool by_conversation = false;
+        if (task.id_slot == -1 && !task.conversation_id.empty()) {
+            for (server_slot & slot : slots) {
+                if (slot.is_processing() || slot.prompt.tokens.empty() || slot.conversation_id != task.conversation_id) {
+                    continue;
+                }
+                const size_t lcp_len = slot.prompt.tokens.get_common_prefix(task.tokens);
+                const float  f_keep  = float(lcp_len) / slot.prompt.tokens.size();
+                SLT_INF(slot, "selected slot by conversation id, f_keep = %.3f\n", f_keep);
+                ret             = &slot;
+                by_conversation = true;
+                update_cache    = f_keep < 0.5f;
+                break;
+            }
+        }
+
+        // a prefix shared by many conversations (slot_match_skip tokens: a system prompt, tools) is no evidence that
+        // a slot holds this one, so the similarity counts the tokens after it
+        const size_t n_skip = std::min<size_t>(std::max<int32_t>(task.slot_match_skip, 0), task.tokens.size());
+
         // find the slot that has at least n% prompt similarity
-        if (slot_prompt_similarity != 0.0f) {
-            float f_sim_best = 0;
+        if (slot_prompt_similarity != 0.0f && !by_conversation) {
+            float  f_sim_best = 0;
+            size_t lcp_best   = 0;
 
             for (server_slot & slot : slots) {
                 if (task.id_slot != -1 && slot.id != task.id_slot) {
@@ -2163,20 +2195,22 @@ private:
 
                 // fraction of the Longest Common Prefix length with respect to the input prompt length
                 const size_t lcp_len = tokens.get_common_prefix(task.tokens);
-                const float f_sim_cur = float(lcp_len) / task.tokens.size();
+                const size_t n_new   = task.tokens.size() - n_skip;
+                const float f_sim_cur = n_new > 0 ? float(lcp_len > n_skip ? lcp_len - n_skip : 0) / n_new : 0.0f;
 
                 SLT_TRC(slot, " - checking sim = %.3f (%zu/%zu) > %.3f\n", f_sim_cur, lcp_len, task.tokens.size(), slot_prompt_similarity);
 
                 // select the current slot if the criteria match
                 if (f_sim_cur > f_sim_best && f_sim_cur > slot_prompt_similarity) {
                     f_sim_best = f_sim_cur;
+                    lcp_best   = lcp_len;
 
                     ret = &slot;
                 }
             }
 
             if (ret != nullptr) {
-                const float f_keep = (f_sim_best*task.tokens.size()) / ret->prompt.tokens.size();
+                const float f_keep = float(lcp_best) / ret->prompt.tokens.size();
 
                 if (task.id_slot == -1) {
                     SLT_INF(*ret, "selected slot by LCP similarity, f_sim_best = %.3f (> %.3f thold), f_keep = %.3f\n",
@@ -2186,6 +2220,19 @@ private:
                 // if we are about to lose a large portion of the existing context - save it in the prompt cache
                 if (f_keep < 0.5f) {
                     update_cache = true;
+                }
+
+                // the best match would discard most of its slot: leave that conversation in place if an empty slot is idle
+                if (task.id_slot == -1 && f_keep < slot_keep_min) {
+                    for (server_slot & slot : slots) {
+                        if (!slot.is_processing() && slot.prompt.tokens.empty()) {
+                            SLT_INF(slot, "selected empty slot instead: slot %d would keep %.3f of its tokens (< %.3f)\n",
+                                    ret->id, f_keep, slot_keep_min);
+                            ret          = &slot;
+                            update_cache = true; // a prompt cache entry for this prompt can still be restored
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -2442,6 +2489,7 @@ private:
         // the per-request limit takes priority over the global one
         slot.n_predict_max = task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict;
 
+        slot.conversation_id = task.conversation_id;
         slot.task = std::make_unique<const server_task>(std::move(task));
 
         slot.state = slot.task->is_child()
@@ -3585,6 +3633,7 @@ private:
 
                         slot->prompt.clear();
                         slot->prompt.tokens = std::move(restored);
+                        slot->conversation_id.clear();
                         if (slot->ctx_dft) {
                             // drop what the draft context still holds for this slot, e.g. a previous conversation
                             llama_memory_seq_rm(llama_get_memory(slot->ctx_dft), slot->id, -1, -1);
@@ -5700,6 +5749,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task.apply_chat_session(chat_session);
 
             task.id_slot = json_value(data, "id_slot", -1);
+            task.slot_match_skip = json_value(data, "slot_match_skip", 0);
+            task.conversation_id = json_value(data, "conversation_id", std::string());
             sse_ping_interval = task.params.sse_ping_interval;
 
             // OAI-compat
