@@ -1892,6 +1892,7 @@ private:
                 cache_dir_enabled ? params_base.cache_dir_path : "",
                 cache_dir_enabled ? server_prompt_cache_key(params_base, ctx_tgt, ctx_dft) : "",
                 mctx != nullptr);
+            prompt_cache->ckpt_dir = params_base.ctx_checkpoints_dir;
         } else {
             SRV_TRC("%s", "prompt cache is disabled - use `--cache-ram N` or `--cache-dir PATH` to enable it\n");
         }
