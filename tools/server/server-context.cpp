@@ -3275,10 +3275,12 @@ private:
         if (slot.ctx_dft == nullptr) {
             return 0;
         }
-        std::ifstream ifs(std::filesystem::u8path(filepath), std::ios::binary);
-        if (!ifs || !ifs.seekg(offset)) {
+        std::ifstream ifs(std::filesystem::u8path(filepath), std::ios::binary | std::ios::ate);
+        const size_t file_size = ifs ? (size_t) ifs.tellg() : 0;
+        if (!ifs || file_size < offset || !ifs.seekg(offset)) {
             return 0;
         }
+        const size_t n_avail = file_size - offset;
         size_t n_read = 0;
         uint32_t magic   = 0;
         uint32_t version = 0;
@@ -3287,7 +3289,7 @@ private:
         }
         std::vector<uint8_t> data;
         if (!ckpt_read(ifs, &version, sizeof(version), n_read) || version != SLOT_DFT_VERSION ||
-            !ckpt_read_buf(ifs, data, n_read)) {
+            !ckpt_read_buf(ifs, data, n_avail, n_read)) {
             SRV_WRN("invalid draft state appendix in '%s' - ignored\n", filepath.c_str());
             return 0;
         }
