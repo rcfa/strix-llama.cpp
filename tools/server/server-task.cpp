@@ -2573,16 +2573,24 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
             checkpoint_disk.pos_max  = checkpoint.pos_max;
 
             checkpoint_disk.offset_tgt = offset;
-            checkpoint_disk.size_tgt   = checkpoint.data_tgt.size();
+            checkpoint_disk.size_tgt   = checkpoint.size_tgt();
             if (checkpoint_disk.size_tgt > 0) {
-                memcpy(state.data.mapping + offset, checkpoint.data_tgt.data(), checkpoint_disk.size_tgt);
+                if (!checkpoint.copy_tgt(state.data.mapping + offset)) {
+                    SRV_WRN("%s", " - failed to read a context checkpoint back from its file, skipping\n");
+                    state.data.discard();
+                    return nullptr;
+                }
                 offset += checkpoint_disk.size_tgt;
             }
 
             checkpoint_disk.offset_dft = offset;
-            checkpoint_disk.size_dft   = checkpoint.data_dft.size();
+            checkpoint_disk.size_dft   = checkpoint.size_dft();
             if (checkpoint_disk.size_dft > 0) {
-                memcpy(state.data.mapping + offset, checkpoint.data_dft.data(), checkpoint_disk.size_dft);
+                if (!checkpoint.copy_dft(state.data.mapping + offset)) {
+                    SRV_WRN("%s", " - failed to read a context checkpoint back from its file, skipping\n");
+                    state.data.discard();
+                    return nullptr;
+                }
                 offset += checkpoint_disk.size_dft;
             }
 
@@ -2877,6 +2885,10 @@ bool server_prompt_cache::load(
                     checkpoint.data_spec.assign(
                         data.mapping + checkpoint_disk.offset_spec,
                         data.mapping + checkpoint_disk.offset_spec + checkpoint_disk.size_spec);
+
+                    if (!ckpt_dir.empty() && !checkpoint.spill(ckpt_dir)) {
+                        SRV_WRN("could not move a context checkpoint to %s - it stays in memory\n", ckpt_dir.c_str());
+                    }
 
                     restored.checkpoints.push_back(std::move(checkpoint));
                 }

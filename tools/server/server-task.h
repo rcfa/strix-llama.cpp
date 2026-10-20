@@ -772,6 +772,9 @@ struct server_prompt_cache {
     std::string cache_dir;
     std::string cache_key;
 
+    // context checkpoints restored from the cache are moved to unlinked files here (--ctx-checkpoints-dir)
+    std::string ckpt_dir;
+
     bool has_mtmd = false;
 
     uint64_t next_file_id = 0;
