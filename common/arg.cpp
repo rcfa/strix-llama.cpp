@@ -3984,6 +3984,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--slot-keep-min"}, "F",
+        string_format("if the slot chosen by prompt similarity would keep less than this fraction of its tokens and an empty slot is idle, use the empty slot (default: %.2f, 0.0 = disabled)", (double) params.slot_keep_min),
+        [](common_params & params, const std::string & value) {
+            params.slot_keep_min = std::stof(value);
+        }
+    ).set_env("LLAMA_ARG_SLOT_KEEP_MIN").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--lora-init-without-apply"},
         string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
         [](common_params & params) {
