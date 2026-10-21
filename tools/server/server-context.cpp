@@ -79,7 +79,8 @@ static std::string server_prompt_cache_key(
     std::ostringstream key;
     // the state format, not the build commit: entries survive an upgrade (a build that changes the state layout
     // bumps LLAMA_STATE_SEQ_VERSION / LLAMA_SESSION_VERSION, and llama_state_seq_set_data checks the sizes)
-    key << "format=2\n";
+    // format 3: the batch sizes (-b, -ub) are not part of the key - they do not change a saved state
+    key << "format=3\n";
     key << "state_seq_version=" << LLAMA_STATE_SEQ_VERSION << "\n";
     key << "session_version=" << LLAMA_SESSION_VERSION << "\n";
     server_prompt_cache_key_add_file(key, "model", params.model.path);
@@ -87,11 +88,7 @@ static std::string server_prompt_cache_key(
     server_prompt_cache_key_add_file(key, "mmproj", params.mmproj.path);
 
     key << "n_ctx_tgt=" << llama_n_ctx(ctx_tgt) << "\n";
-    key << "n_batch_tgt=" << llama_n_batch(ctx_tgt) << "\n";
-    key << "n_ubatch_tgt=" << llama_n_ubatch(ctx_tgt) << "\n";
     key << "n_ctx_dft=" << (ctx_dft ? llama_n_ctx(ctx_dft) : 0) << "\n";
-    key << "n_batch_dft=" << (ctx_dft ? llama_n_batch(ctx_dft) : 0) << "\n";
-    key << "n_ubatch_dft=" << (ctx_dft ? llama_n_ubatch(ctx_dft) : 0) << "\n";
     key << "n_parallel=" << params.n_parallel << "\n";
     key << "cache_type_k=" << (int) params.cache_type_k << "\n";
     key << "cache_type_v=" << (int) params.cache_type_v << "\n";
