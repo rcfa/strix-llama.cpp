@@ -4678,16 +4678,27 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             ggml_vk_create_pipeline(device, device->pipeline_flash_attn_sel_prep,
                 "flash_attn_sel_prep", flash_attn_sel_prep_len, flash_attn_sel_prep_data, "main", 2,
                 sizeof(vk_op_flash_attn_sel_push_constants), {1, 1, 1}, {}, 1, true);
-            static const char * sel_names[3] = { "flash_attn_sel_f16_gqa4", "flash_attn_sel_f16_gqa8", "flash_attn_sel_f16_gqa12" };
+            // [K q8_0][V q8_0]: the f16 / q8_0 combinations of K and V
+            static const char * sel_names[2][2][3] = {
+                { { "flash_attn_sel_f16_f16_gqa4",  "flash_attn_sel_f16_f16_gqa8",  "flash_attn_sel_f16_f16_gqa12" },
+                  { "flash_attn_sel_f16_q8_0_gqa4", "flash_attn_sel_f16_q8_0_gqa8", "flash_attn_sel_f16_q8_0_gqa12" } },
+                { { "flash_attn_sel_q8_0_f16_gqa4", "flash_attn_sel_q8_0_f16_gqa8", "flash_attn_sel_q8_0_f16_gqa12" },
+                  { "flash_attn_sel_q8_0_q8_0_gqa4", "flash_attn_sel_q8_0_q8_0_gqa8", "flash_attn_sel_q8_0_q8_0_gqa12" } } };
+            const void * sel_data[2][2] = { { flash_attn_sel_f16_f16_data, flash_attn_sel_f16_q8_0_data },
+                                            { flash_attn_sel_q8_0_f16_data, flash_attn_sel_q8_0_q8_0_data } };
+            const size_t sel_len[2][2] = { { flash_attn_sel_f16_f16_len, flash_attn_sel_f16_q8_0_len },
+                                           { flash_attn_sel_q8_0_f16_len, flash_attn_sel_q8_0_q8_0_len } };
+            for (uint32_t kv = 0; kv < 4; ++kv)
             for (uint32_t i = 0; i < 3; ++i) {
+                const uint32_t kq = kv / 2, vq = kv % 2;
                 const uint32_t gqa = 4 * (i + 1);
                 // shared memory: Q (1 KiB per head), a K and a V block (16 KiB each), P and the block's keys:
                 // 46,720 bytes at GQA 12 (the selection row is read from the pre-pass output, not kept here)
                 const uint32_t sel_shmem = 4 * gqa * 256 + 2 * 2 * 256 * 32 + 4 * gqa * 32 + 4 * 32;
                 if (64 * gqa <= device->properties.limits.maxComputeWorkGroupInvocations &&
                     sel_shmem <= device->properties.limits.maxComputeSharedMemorySize) {
-                    ggml_vk_create_pipeline(device, device->pipeline_flash_attn_sel_f16[i],
-                        sel_names[i], flash_attn_sel_f16_len, flash_attn_sel_f16_data, "main", 5,
+                    ggml_vk_create_pipeline(device, device->pipeline_flash_attn_sel[kq][vq][i],
+                        sel_names[kq][vq][i], sel_len[kq][vq], sel_data[kq][vq], "main", 5,
                         sizeof(vk_op_flash_attn_sel_push_constants), {1, 1, 1}, {64 * gqa, 64, gqa}, 1, true, true, 64);
                 }
             }
@@ -4697,10 +4708,20 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             if (device->subgroup_ballot && device->coopmat_support && device->coopmat_support_16x16x16_f32acc &&
                 device->vendor_id == VK_VENDOR_ID_AMD && device->architecture == AMD_RDNA3 &&
                 device->driver_id == vk::DriverId::eMesaRadv) {
-                static const char * sel_cm_names[3] = { "flash_attn_sel_cm_f16_gqa4", "flash_attn_sel_cm_f16_gqa8", "flash_attn_sel_cm_f16_gqa12" };
+                static const char * sel_cm_names[2][2][3] = {
+                    { { "flash_attn_sel_cm_f16_f16_gqa4",  "flash_attn_sel_cm_f16_f16_gqa8",  "flash_attn_sel_cm_f16_f16_gqa12" },
+                      { "flash_attn_sel_cm_f16_q8_0_gqa4", "flash_attn_sel_cm_f16_q8_0_gqa8", "flash_attn_sel_cm_f16_q8_0_gqa12" } },
+                    { { "flash_attn_sel_cm_q8_0_f16_gqa4", "flash_attn_sel_cm_q8_0_f16_gqa8", "flash_attn_sel_cm_q8_0_f16_gqa12" },
+                      { "flash_attn_sel_cm_q8_0_q8_0_gqa4", "flash_attn_sel_cm_q8_0_q8_0_gqa8", "flash_attn_sel_cm_q8_0_q8_0_gqa12" } } };
+                const void * sel_cm_data[2][2] = { { flash_attn_sel_cm_f16_f16_data, flash_attn_sel_cm_f16_q8_0_data },
+                                                   { flash_attn_sel_cm_q8_0_f16_data, flash_attn_sel_cm_q8_0_q8_0_data } };
+                const size_t sel_cm_len[2][2] = { { flash_attn_sel_cm_f16_f16_len, flash_attn_sel_cm_f16_q8_0_len },
+                                                  { flash_attn_sel_cm_q8_0_f16_len, flash_attn_sel_cm_q8_0_q8_0_len } };
+                for (uint32_t kv = 0; kv < 4; ++kv)
                 for (uint32_t i = 0; i < 3; ++i) {
-                    ggml_vk_create_pipeline(device, device->pipeline_flash_attn_sel_cm_f16[i],
-                        sel_cm_names[i], flash_attn_sel_cm_f16_len, flash_attn_sel_cm_f16_data, "main", 5,
+                    const uint32_t kq = kv / 2, vq = kv % 2;
+                    ggml_vk_create_pipeline(device, device->pipeline_flash_attn_sel_cm[kq][vq][i],
+                        sel_cm_names[kq][vq][i], sel_cm_len[kq][vq], sel_cm_data[kq][vq], "main", 5,
                         sizeof(vk_op_flash_attn_sel_push_constants), {1, 1, 1}, {4 * (i + 1)}, 1, true, true, 64);
                 }
             }
@@ -10466,32 +10487,36 @@ static vk_pipeline ggml_vk_flash_attn_sel_pipeline(const vk_device & device, con
     float logit_softcap = 0.0f;
     memcpy(&max_bias,      (const float *) op->op_params + 1, sizeof(float));
     memcpy(&logit_softcap, (const float *) op->op_params + 2, sizeof(float));
+    // K and V each f16 or q8_0: the shaders count their strides in elements of that type (a q8_0 block holds 32 values)
+    const bool k_q8 = k->type == GGML_TYPE_Q8_0;
+    const bool v_q8 = v->type == GGML_TYPE_Q8_0;
+    const size_t k_ts = ggml_type_size(k->type);
+    const size_t v_ts = ggml_type_size(v->type);
     if (max_bias != 0.0f || logit_softcap != 0.0f || op->type != GGML_TYPE_F32 || !ggml_is_contiguous(op) ||
-        q->type != GGML_TYPE_F32 || k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16 || ids->type != GGML_TYPE_I32 ||
+        q->type != GGML_TYPE_F32 || (k->type != GGML_TYPE_F16 && !k_q8) || (v->type != GGML_TYPE_F16 && !v_q8) ||
+        ids->type != GGML_TYPE_I32 ||
         q->ne[0] != 256 || k->ne[0] != 256 || v->ne[0] != 256 ||
         k->ne[1] != v->ne[1] || k->ne[2] != v->ne[2] || k->ne[3] != q->ne[3] || v->ne[3] != q->ne[3] ||
         k->ne[2] < 1 || q->ne[2] % k->ne[2] != 0 ||
         ids->ne[0] < 1 || ids->ne[0] > 4096 || ids->ne[1] < q->ne[1] || ids->ne[2] != 1 ||
         (ids->ne[3] != 1 && ids->ne[3] != q->ne[3]) ||
-        q->nb[0] != sizeof(float) || k->nb[0] != sizeof(ggml_fp16_t) || v->nb[0] != sizeof(ggml_fp16_t) ||
-        ids->nb[0] != sizeof(int32_t)) {
+        q->nb[0] != sizeof(float) || k->nb[0] != k_ts || v->nb[0] != v_ts || ids->nb[0] != sizeof(int32_t)) {
         return nullptr;
     }
     for (int i = 1; i < 4; ++i) {
-        if (q->nb[i] % sizeof(float) || k->nb[i] % sizeof(ggml_fp16_t) || v->nb[i] % sizeof(ggml_fp16_t) ||
-            ids->nb[i] % sizeof(int32_t)) {
+        if (q->nb[i] % sizeof(float) || k->nb[i] % k_ts || v->nb[i] % v_ts || ids->nb[i] % sizeof(int32_t)) {
             return nullptr;
         }
     }
     // the shader indexes with 32-bit element offsets
-    if (ggml_nbytes(k) / sizeof(ggml_fp16_t) > UINT32_MAX || ggml_nbytes(v) / sizeof(ggml_fp16_t) > UINT32_MAX ||
+    if (ggml_nbytes(k) / k_ts > UINT32_MAX || ggml_nbytes(v) / v_ts > UINT32_MAX ||
         ggml_nbytes(q) / sizeof(float) > UINT32_MAX || ggml_nbytes(op) / sizeof(float) > UINT32_MAX) {
         return nullptr;
     }
     switch (q->ne[2] / k->ne[2]) {
-        case 4:  return device->pipeline_flash_attn_sel_f16[0];
-        case 8:  return device->pipeline_flash_attn_sel_f16[1];
-        case 12: return device->pipeline_flash_attn_sel_f16[2];
+        case 4:  return device->pipeline_flash_attn_sel[k_q8][v_q8][0];
+        case 8:  return device->pipeline_flash_attn_sel[k_q8][v_q8][1];
+        case 12: return device->pipeline_flash_attn_sel[k_q8][v_q8][2];
         default: return nullptr;
     }
 }
@@ -10512,12 +10537,16 @@ static bool ggml_vk_flash_attn_sel(ggml_backend_vk_context * ctx, vk_context & s
     const vk_subbuffer ids_buf = ggml_vk_tensor_subbuffer(ctx, ids);
     const vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst);
 
-    // the WMMA kernel reads K and V rows in 16-byte pieces
+    // the WMMA kernel reads f16 K and V rows in 16-byte pieces (q8_0 rows in 16-bit words)
+    const bool k_q8 = k->type == GGML_TYPE_Q8_0;
+    const bool v_q8 = v->type == GGML_TYPE_Q8_0;
+    const size_t k_ts = ggml_type_size(k->type);
+    const size_t v_ts = ggml_type_size(v->type);
     const int gqa_idx = (int) (q->ne[2] / k->ne[2]) / 4 - 1;
-    vk_pipeline pipeline_cm = ctx->device->pipeline_flash_attn_sel_cm_f16[gqa_idx];
-    bool use_cm = pipeline_cm != nullptr && k_buf.offset % 16 == 0 && v_buf.offset % 16 == 0;
+    vk_pipeline pipeline_cm = ctx->device->pipeline_flash_attn_sel_cm[k_q8][v_q8][gqa_idx];
+    bool use_cm = pipeline_cm != nullptr && (k_q8 || k_buf.offset % 16 == 0) && (v_q8 || v_buf.offset % 16 == 0);
     for (int i = 1; i < 4; ++i) {
-        use_cm = use_cm && k->nb[i] % 16 == 0 && v->nb[i] % 16 == 0;
+        use_cm = use_cm && (k_q8 || k->nb[i] % 16 == 0) && (v_q8 || v->nb[i] % 16 == 0);
     }
     // one workgroup per (query, split, K/V head) on x
     use_cm = use_cm && (uint64_t) q->ne[1] * k->ne[2] * CEIL_DIV(ids->ne[0], 32) <= ctx->device->properties.limits.maxComputeWorkGroupCount[0];
@@ -10548,8 +10577,8 @@ static bool ggml_vk_flash_attn_sel(ggml_backend_vk_context * ctx, vk_context & s
     const vk_op_flash_attn_sel_push_constants pc = {
         (uint32_t) k->ne[1], n_sel, list_stride,
         (uint32_t) (q->nb[1] / sizeof(float)), (uint32_t) (q->nb[2] / sizeof(float)), (uint32_t) (q->nb[3] / sizeof(float)),
-        (uint32_t) (k->nb[1] / sizeof(ggml_fp16_t)), (uint32_t) (k->nb[2] / sizeof(ggml_fp16_t)), (uint32_t) (k->nb[3] / sizeof(ggml_fp16_t)),
-        (uint32_t) (v->nb[1] / sizeof(ggml_fp16_t)), (uint32_t) (v->nb[2] / sizeof(ggml_fp16_t)), (uint32_t) (v->nb[3] / sizeof(ggml_fp16_t)),
+        (uint32_t) (k->nb[1] / k_ts), (uint32_t) (k->nb[2] / k_ts), (uint32_t) (k->nb[3] / k_ts),
+        (uint32_t) (v->nb[1] / v_ts), (uint32_t) (v->nb[2] / v_ts), (uint32_t) (v->nb[3] / v_ts),
         (uint32_t) (ids->nb[1] / sizeof(int32_t)), ids->ne[3] == 1 ? 0u : (uint32_t) (ids->nb[3] / sizeof(int32_t)),
         (uint32_t) (dst->nb[1] / sizeof(float)), (uint32_t) (dst->nb[2] / sizeof(float)), (uint32_t) (dst->nb[3] / sizeof(float)),
         scale, n_split, chunk, NH, N, NS,
