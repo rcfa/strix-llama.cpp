@@ -560,29 +560,59 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
     const int64_t D = S_v * S_v * H_v;
     const int64_t K = cparams.n_rs_seq + 1;
 
+    // A long batch (a prompt ubatch) runs its head without snapshots and only its last K tokens with them, starting
+    // from the head's final state. Rollback reads snapshots only for the last K tokens of a sequence (seq_rm in
+    // llama-memory-recurrent is bounded by n_rs_seq, and split_equal keeps those tokens in one ubatch), and without
+    // snapshots a backend can run its chunked prefill form: Vulkan's gdn_chunk_scan takes only K == 1, and the per-token
+    // kernel it fell back to made a 2048-token ubatch ~6x slower in this op (MTP prefill ~20% slower on Flash-Next).
+    const int64_t split_min = 64;    // the shortest head worth a second op (Vulkan's chunk_min)
+    ggml_tensor * head_out  = nullptr;
+    if (n_seq_tokens - K >= split_min) {
+        const int64_t n_head = n_seq_tokens - K;
+        auto part = [&](ggml_tensor * t, int64_t i0, int64_t n) {
+            return ggml_view_4d(ctx0, t, t->ne[0], t->ne[1], n, t->ne[3], t->nb[1], t->nb[2], t->nb[3], i0*t->nb[2]);
+        };
+        // the op takes q, k, v with contiguous rows but g and beta whole-contiguous: a token range of several
+        // sequences is not, so those two (H_v floats per token) are copied
+        auto cpart = [&](ggml_tensor * t, int64_t i0, int64_t n) {
+            ggml_tensor * x = part(t, i0, n);
+            return ggml_is_contiguous(x) ? x : ggml_cont(ctx0, x);
+        };
+        auto head = build_delta_net_fused(part(q, 0, n_head), part(k, 0, n_head), part(v, 0, n_head),
+                                          cpart(g, 0, n_head), cpart(b, 0, n_head), s, il);
+        head_out = head.first;    // the same fused op as below (K == 1), so its state has the layout the tail reads
+        q = part(q, n_head, K); k = part(k, n_head, K); v = part(v, n_head, K);
+        g = cpart(g, n_head, K); b = cpart(b, n_head, K);
+        s = head.second;
+    }
+    const int64_t n_snap_tokens = q->ne[2];    // the tokens the snapshot op runs: all of them, or the last K
+
     // state s is 4D [S_v, S_v, H_v, n_seqs]; K snapshot slots are written into the output.
     ggml_tensor * gdn_out = ggml_gated_delta_net(ctx0, q, k, v, g, b, s, K);
-    if (n_seq_tokens > 1) {
+    if (n_snap_tokens > 1) {
         res->add_fused_node({LLM_FUSED_OP_GDN_CH, gdn_out, il});
     } else {
         res->add_fused_node({LLM_FUSED_OP_GDN_AR, gdn_out, il});
     }
 
-    const int64_t attn_score_elems    = S_v * H_v * n_seq_tokens * n_seqs;
+    const int64_t attn_score_elems    = S_v * H_v * n_snap_tokens * n_seqs;
     const int64_t state_size_per_snap = S_v * S_v * H_v * n_seqs;
 
     ggml_tensor * output = ggml_view_4d(ctx0, gdn_out,
-        S_v, H_v, n_seq_tokens, n_seqs,
+        S_v, H_v, n_snap_tokens, n_seqs,
         ggml_row_size(gdn_out->type, S_v),
         ggml_row_size(gdn_out->type, S_v * H_v),
-        ggml_row_size(gdn_out->type, S_v * H_v * n_seq_tokens),
+        ggml_row_size(gdn_out->type, S_v * H_v * n_snap_tokens),
         0);
+    if (head_out) {
+        output = ggml_concat(ctx0, head_out, output, 2);    // [S_v, H_v, n_seq_tokens, n_seqs]
+    }
     cb(output, "attn_output", il);
 
     const size_t row_size = hparams.n_embd_s() * ggml_element_size(ssm_states_all);
 
-    // op writes the last min(n_seq_tokens, K) snapshots; trailing slots are left unwritten
-    const int64_t n_written = std::min<int64_t>(n_seq_tokens, K);
+    // op writes the last min(n_snap_tokens, K) snapshots; trailing slots are left unwritten
+    const int64_t n_written = std::min<int64_t>(n_snap_tokens, K);
 
     // write the produced snapshots into the recurrent cache (snapshot slot i -> rollback group i)
     ggml_tensor * src = ggml_view_3d(ctx0, gdn_out,
