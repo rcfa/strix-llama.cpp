@@ -2448,6 +2448,7 @@ server_prompt_cache::server_prompt_cache(
             server_prompt_cache_remove_files(data_path);
             continue;
         }
+        state.id = ++id_last;
         states.push_back(std::move(state));
     }
 
@@ -2623,6 +2624,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
         }
     }
 
+    state.id = ++id_last;
     states.push_back(std::move(state));
 
     return &states.back();
@@ -2843,9 +2845,9 @@ bool server_prompt_cache::load(
 
             const size_t n_tgt = server_prompt_state_set_staged(ctx_tgt, data.mapping, data.main_size, id_slot);
             if (n_tgt != data.main_size) {
+                // often only a full pool: the entry stays until room has been made for it
                 SRV_ERR("failed to restore state with size %zu\n", data.main_size);
-                data.discard();
-                states.erase(it_best);
+                id_failed = it_best->id;
                 return false;
             }
 
@@ -2860,8 +2862,7 @@ bool server_prompt_cache::load(
                 const size_t n_dft = server_prompt_state_set_staged(ctx_dft, data.mapping + data.main_size, data.drft_size, id_slot);
                 if (n_dft != data.drft_size) {
                     SRV_WRN("failed to restore state with size %zu\n", data.drft_size);
-                    data.discard();
-                    states.erase(it_best);
+                    id_failed = it_best->id;
                     return false;
                 }
             }
@@ -2919,6 +2920,8 @@ bool server_prompt_cache::load(
                 if (n != size) {
                     SRV_ERR("failed to restore state with size %zu\n", size);
 
+                    id_failed = it_best->id;
+
                     return false;
                 }
 
@@ -2937,6 +2940,8 @@ bool server_prompt_cache::load(
                     if (n != size) {
                         SRV_WRN("failed to restore state with size %zu\n", size);
 
+                        id_failed = it_best->id;
+
                         return false;
                     }
 
@@ -2952,6 +2957,25 @@ bool server_prompt_cache::load(
     }
 
     return true;
+}
+
+bool server_prompt_cache::contains(uint64_t id) const {
+    return std::any_of(states.begin(), states.end(), [id](const server_prompt_cache_state & state) {
+        return state.id == id;
+    });
+}
+
+void server_prompt_cache::discard_unrestorable(uint64_t id) {
+    for (auto it = states.begin(); it != states.end(); ++it) {
+        if (it->id == id) {
+            if (it->data.is_disk()) {
+                SRV_WRN("removing a disk prompt cache entry that cannot be restored (%s)\n", it->data.cache_file.c_str());
+                it->data.discard();
+                states.erase(it);
+            }
+            return;
+        }
+    }
 }
 
 void server_prompt_cache::update() {

@@ -748,6 +748,9 @@ struct server_prompt_cache_state {
     server_prompt_data data;
     std::vector<server_prompt_cache_checkpoint> checkpoints_disk;
 
+    // unique within the cache
+    uint64_t id = 0;
+
     size_t size() const {
         size_t res = data.size();
 
@@ -784,6 +787,16 @@ struct server_prompt_cache {
     bool has_mtmd = false;
 
     uint64_t next_file_id = 0;
+
+    uint64_t id_last = 0;
+
+    // the entry the last failed load() could not restore
+    uint64_t id_failed = 0;
+
+    bool contains(uint64_t id) const;
+
+    // removes a disk entry that cannot be restored even with room made for it
+    void discard_unrestorable(uint64_t id);
 
     size_t size() const;
 
