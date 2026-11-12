@@ -2,6 +2,7 @@ import pytest
 from utils import *
 import base64
 import requests
+import shutil
 import struct
 
 # sequence state file: magic(4) version(4) payload_size(4), then payload_size llama_token words
@@ -733,12 +734,18 @@ def test_slot_restore_damaged_checkpoint_appendix(swa_server, damage):
 
 # the draft blobs of the checkpoint appendix are not covered by the main payload checks,
 # so restoring into a server with another draft KV cache type must not abort
+# with --ctx-checkpoints-dir the restored checkpoints live in files, and the draft test-load must still run:
+# without it the rewind fails to load the draft state and reprocesses the whole prompt
+@pytest.mark.parametrize("ckpt_dir", [False, True], ids=["in_memory", "ckpt_dir"])
 @pytest.mark.parametrize("ctkd_restore", ["f16", "q8_0"])
-def test_slot_restore_checkpoints_draft_kv_type_change(swa_server, ctkd_restore):
+def test_slot_restore_checkpoints_draft_kv_type_change(swa_server, ctkd_restore, ckpt_dir):
     server = swa_server
     server.model_draft_hf_repo = "ggml-org/tinygemma3-GGUF:Q8_0"  # same file as the target, already in the HF cache
     server.spec_type = "draft-simple"
     server.ctkd = "f16"
+    if ckpt_dir:
+        os.makedirs("./tmp/ckpt", exist_ok=True)
+        server.ctx_checkpoints_dir = "./tmp/ckpt"
     server.start()
 
     base = "The quick brown fox jumps over the lazy dog. " * 20
@@ -789,6 +796,94 @@ def test_slot_restore_checkpoints_draft_kv_type_change(swa_server, ctkd_restore)
     })
     assert res.status_code == 200
     assert res.body["timings"]["prompt_n"] == n_live
+
+
+# preloaded into the server: every pread of a --ctx-checkpoints-dir file fails with EIO, as on a failing disk
+CKPT_READ_FAIL_SHIM = r'''
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+static int is_ckpt(int fd) {
+    char link[64], path[4096];
+    snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+    const ssize_t n = readlink(link, path, sizeof(path) - 1);
+    if (n < 0) {
+        return 0;
+    }
+    path[n] = '\0';
+    return strstr(path, "/llama-ckpt-") != NULL;
+}
+
+ssize_t pread(int fd, void * buf, size_t count, off_t off) {
+    static ssize_t (*real)(int, void *, size_t, off_t);
+    if (!real) {
+        real = (ssize_t (*)(int, void *, size_t, off_t)) dlsym(RTLD_NEXT, "pread");
+    }
+    if (is_ckpt(fd)) {
+        errno = EIO;
+        return -1;
+    }
+    return real(fd, buf, count, off);
+}
+
+ssize_t pread64(int fd, void * buf, size_t count, off64_t off) {
+    static ssize_t (*real)(int, void *, size_t, off64_t);
+    if (!real) {
+        real = (ssize_t (*)(int, void *, size_t, off64_t)) dlsym(RTLD_NEXT, "pread64");
+    }
+    if (is_ckpt(fd)) {
+        errno = EIO;
+        return -1;
+    }
+    return real(fd, buf, count, off);
+}
+'''
+
+
+# a context checkpoint the server made itself, read back from --ctx-checkpoints-dir with a disk error:
+# the rewind must fall back to reprocessing the prompt, not abort the server
+@pytest.mark.skipif(not sys.platform.startswith("linux") or shutil.which("cc") is None,
+                    reason="needs Linux (/proc/self/fd) and a C compiler")
+def test_ctx_checkpoint_read_error_reprocesses(swa_server, monkeypatch):
+    shim_src = os.path.abspath("./tmp/ckpt-read-fail.c")
+    shim = os.path.abspath("./tmp/ckpt-read-fail.so")
+    with open(shim_src, "w") as f:
+        f.write(CKPT_READ_FAIL_SHIM)
+    subprocess.run(["cc", "-shared", "-fPIC", "-o", shim, shim_src, "-ldl"], check=True)
+
+    server = swa_server
+    os.makedirs("./tmp/ckpt", exist_ok=True)
+    server.ctx_checkpoints_dir = "./tmp/ckpt"
+    monkeypatch.setenv("LD_PRELOAD", shim)
+    server.start()
+    monkeypatch.delenv("LD_PRELOAD")
+
+    base = "The quick brown fox jumps over the lazy dog. " * 20
+
+    res = server.make_request("POST", "/completion", data={
+        "prompt": base + "The first ending of this story is a happy one.",
+        "id_slot": 1,
+        "cache_prompt": True,
+    })
+    assert res.status_code == 200
+
+    # the diverging prompt rewinds to a checkpoint, and reading its file fails
+    try:
+        res = server.make_request("POST", "/completion", data={
+            "prompt": base + "But the second ending was different and sad.",
+            "id_slot": 1,
+            "cache_prompt": True,
+        })
+    except requests.exceptions.ConnectionError:
+        pytest.fail("the server died on a failed context checkpoint read")
+    assert res.status_code == 200
+    assert res.body["timings"]["cache_n"] == 0
+    assert server.make_request("GET", "/health").status_code == 200
 
 
 def test_slot_save_restore_draft_state(swa_server):
