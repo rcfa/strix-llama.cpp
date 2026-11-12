@@ -3278,7 +3278,8 @@ private:
             }
         }
         // the slot file does not check the draft context - test-load one draft checkpoint, drop the draft data if it does not fit
-        if (ctx_dft != nullptr && !checkpoints.empty() && !checkpoints.back().data_dft.empty()) {
+        //   size_dft(), not data_dft: with --ctx-checkpoints-dir the draft data is already in the checkpoint's file
+        if (ctx_dft != nullptr && !checkpoints.empty() && checkpoints.back().size_dft() > 0) {
             const bool ok = checkpoints.back().load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
             llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, -1, -1);
             if (!ok) {
@@ -4433,11 +4434,14 @@ private:
                                         // restore the context checkpoint
                                         if (!it->load_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) ||
                                             !it->load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY)) {
-                                            if (it->id_task != -1) {
+                                            // a checkpoint made here and held in memory always loads - anything else is a bug
+                                            if (it->id_task != -1 && !it->file) {
                                                 GGML_ABORT("failed to restore context checkpoint\n");
                                             }
-                                            // restored from a slot file, not guaranteed to load - fall back to full prompt re-processing
-                                            SLT_WRN(slot, "%s", "failed to load context checkpoint restored from a slot file\n");
+                                            // restored from a slot file (not guaranteed to load) or read back from --ctx-checkpoints-dir
+                                            // (a disk error) - fall back to full prompt re-processing
+                                            SLT_WRN(slot, "failed to load context checkpoint %s\n",
+                                                    it->id_task == -1 ? "restored from a slot file" : "from --ctx-checkpoints-dir");
                                             do_reset = true;
                                         }
                                     }

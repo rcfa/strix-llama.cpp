@@ -2442,13 +2442,16 @@ bool common_prompt_checkpoint::spill(const std::string & dir) {
     }
 
     std::string path = dir + "/llama-ckpt-XXXXXX";
-    const int fd = mkstemp(path.data());
+    // O_CLOEXEC at creation: a child process spawned by another thread must never inherit the descriptor
+    const int fd = mkostemp(path.data(), O_CLOEXEC);
     if (fd < 0) {
         return false;
     }
     // the descriptor keeps the file; nothing is left behind when it is closed, even after a crash
-    unlink(path.c_str());
-    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    if (unlink(path.c_str()) != 0) {
+        close(fd);
+        return false;
+    }
 
     auto f = std::make_shared<common_prompt_checkpoint_file>();
     f->fd = fd;
