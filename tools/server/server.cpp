@@ -743,6 +743,7 @@ static int server_run_instance(common_params & params, server_role & role, commo
     // this call blocks the main thread until queue_tasks.terminate() is called
     ctx_server.start_loop();
 
+    ctx_server.save_slots_to_cache();
     clean_up();
     ctx_http.join();
     if (monitor_thread.joinable()) {

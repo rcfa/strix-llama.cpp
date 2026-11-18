@@ -1719,6 +1719,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--ctx-checkpoints-dir"}, "PATH",
+        "keep context checkpoints in unlinked files in this directory instead of host memory; they are read back "
+        "only to rewind a slot (default: in memory)",
+        [](common_params & params, const std::string & value) {
+            params.ctx_checkpoints_dir = value;
+        }
+    ).set_env("LLAMA_ARG_CTX_CHECKPOINTS_DIR").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"-cram", "--cache-ram"}, "N",
         string_format("set the maximum cache size in MiB (default: %d, 0 for decision models, -1 - no limit, 0 - disable)"
             "[(more info)](https://github.com/ggml-org/llama.cpp/pull/16391)", params.cache_ram_mib),
@@ -1727,6 +1735,23 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.cache_ram_explicit = true;
         }
     ).set_env("LLAMA_ARG_CACHE_RAM").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--cache-dir"}, "PATH",
+        "persist prompt cache state in this directory (not the model download cache) and restore it after server restart",
+        [](common_params & params, const std::string & value) {
+            params.cache_dir_path = value;
+        }
+    ).set_env("LLAMA_ARG_CACHE_DIR").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--cache-dir-max"}, "N",
+        string_format("set the maximum persistent prompt cache size in MiB (default: %d, -1 - no limit, 0 - disable)", params.cache_dir_max_mib),
+        [](common_params & params, int value) {
+            if (value < -1) {
+                throw std::invalid_argument("cache-dir-max must be -1 or non-negative");
+            }
+            params.cache_dir_max_mib = value;
+        }
+    ).set_env("LLAMA_ARG_CACHE_DIR_MAX").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-kvu", "--kv-unified"},
         {"-no-kvu", "--no-kv-unified"},
@@ -1738,7 +1763,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"--cache-idle-slots"},
         {"--no-cache-idle-slots"},
-        "save idle slots to the prompt cache on new task, and clear them when using unified KV (default: enabled, requires cache-ram)",
+        "save idle slots to the prompt cache on new task, and clear them when using unified KV (default: enabled, requires a prompt cache)",
         [](common_params & params, bool value) {
             params.cache_idle_slots = value;
         }
@@ -3992,6 +4017,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.slot_prompt_similarity = std::stof(value);
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--slot-keep-min"}, "F",
+        string_format("if the slot chosen by prompt similarity would keep less than this fraction of its tokens and an empty slot is idle, use the empty slot (default: %.2f, 0.0 = disabled)", (double) params.slot_keep_min),
+        [](common_params & params, const std::string & value) {
+            params.slot_keep_min = std::stof(value);
+        }
+    ).set_env("LLAMA_ARG_SLOT_KEEP_MIN").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--lora-init-without-apply"},
         string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),

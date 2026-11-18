@@ -86,6 +86,7 @@ class ServerProcess:
     ctk: str | None = None
     ctv: str | None = None
     ctkd: str | None = None
+    ctx_checkpoints_dir: str | None = None
     fa: str | None = None
     server_continuous_batching: bool | None = False
     server_embeddings: bool | None = False
@@ -123,6 +124,8 @@ class ServerProcess:
     sleep_idle_seconds: int | None = None
     cache_ram: int | None = None
     override_kv: str | None = None
+    cache_dir: str | None = None
+    cache_dir_max: int | None = None
     no_cache_idle_slots: bool = False
     log_path: str | None = None
     ui_mcp_proxy: bool = False
@@ -245,6 +248,8 @@ class ServerProcess:
             server_args.extend(["-ctv", self.ctv])
         if self.ctkd:
             server_args.extend(["-ctkd", self.ctkd])
+        if self.ctx_checkpoints_dir:
+            server_args.extend(["--ctx-checkpoints-dir", self.ctx_checkpoints_dir])
         if self.fa is not None:
             server_args.extend(["-fa", self.fa])
         if self.n_predict:
@@ -309,6 +314,10 @@ class ServerProcess:
             server_args.extend(["--cache-ram", self.cache_ram])
         if self.override_kv:
             server_args.extend(["--override-kv", self.override_kv])
+        if self.cache_dir is not None:
+            server_args.extend(["--cache-dir", self.cache_dir])
+        if self.cache_dir_max is not None:
+            server_args.extend(["--cache-dir-max", self.cache_dir_max])
         if self.no_cache_idle_slots:
             server_args.append("--no-cache-idle-slots")
         if self.ui_mcp_proxy:

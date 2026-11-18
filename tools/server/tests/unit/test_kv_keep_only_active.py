@@ -207,3 +207,26 @@ def test_failed_restore_stops_when_entry_is_evicted():
     assert logs.count("looking for better prompt") == 2
 
     assert server.make_request("GET", "/health").status_code == 200
+
+
+# a disk entry that does not fit yet must stay in the cache while room is made for it
+def test_failed_restore_keeps_disk_entry(tmp_path):
+    global server
+    server.cache_dir = str(tmp_path)
+    server.cache_dir_max = 64
+    log = _start_full_pool_server(cache_ram=32)
+    shared = _segment("shared", 125)
+    t = shared + _segment("t", 625)
+    w = _segment("w", 500)
+
+    _complete(t, id_slot=0)
+    _complete(_segment("u", 750), id_slot=1)
+    _complete(w, id_slot=2)
+    _complete(shared + _segment("v", 250), id_slot=0)  # t goes to the cache
+    _complete(w + _segment("w2", 250), id_slot=2)
+    log.drain()
+
+    assert _complete(t + _segment("z", 12)) <= 16
+    logs = log.drain()
+    assert "failed to restore state" in logs
+    assert "purging slot 1" in logs
