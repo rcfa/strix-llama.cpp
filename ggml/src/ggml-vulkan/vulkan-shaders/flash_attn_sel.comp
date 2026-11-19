@@ -15,6 +15,13 @@
 // subgroup reductions per block instead of one per key. With n_split > 1 (few queries) each workgroup takes one
 // chunk of the cleaned row and writes a partial result in the layout of flash_attn_split_k_reduce.comp.
 // flash_attn_sel_cm.comp is the fast path on RDNA3; this kernel runs everywhere else.
+// K_Q8_0 / V_Q8_0: that cache is q8_0, dequantized while the block is staged; its strides count blocks, not halves.
+
+#if defined(K_Q8_0) || defined(V_Q8_0)
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+struct block_q8_0 { float16_t d; int8_t qs[32]; };
+#endif
 
 layout(constant_id = 0) const uint WORKGROUP_SIZE = 768;
 layout(constant_id = 1) const uint SUBGROUP_SIZE = 64;
@@ -22,8 +29,16 @@ layout(constant_id = 2) const uint GQA = 12;
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
 layout(binding = 0) readonly  buffer QBuf   { float     data_q[];   };
+#ifdef K_Q8_0
+layout(binding = 1) readonly  buffer KBuf   { block_q8_0 data_k[];  };
+#else
 layout(binding = 1) readonly  buffer KBuf   { float16_t data_k[];   };
+#endif
+#ifdef V_Q8_0
+layout(binding = 2) readonly  buffer VBuf   { block_q8_0 data_v[];  };
+#else
 layout(binding = 2) readonly  buffer VBuf   { float16_t data_v[];   };
+#endif
 layout(binding = 3) readonly  buffer ListBuf { uint      data_list[]; };
 layout(binding = 4) writeonly buffer DstBuf { float     data_dst[]; };
 
@@ -67,6 +82,24 @@ shared float q_sh[GQA * HEAD_SIZE];
 shared float16_t kt_sh[HEAD_SIZE * BK]; // K block, transposed: [dim][key], so the per-lane key reads hit different banks
 shared float16_t v_sh[BK * HEAD_SIZE];  // V block: [key][dim]
 shared float p_sh[GQA * BK];
+
+// element dim of the K / V row that starts at row (f16 elements, or q8_0 blocks)
+float16_t k_at(uint row, uint dim) {
+#ifdef K_Q8_0
+    const uint ib = row + dim / 32;
+    return float16_t(float(data_k[ib].d) * float(data_k[ib].qs[dim % 32]));
+#else
+    return data_k[row + dim];
+#endif
+}
+float16_t v_at(uint row, uint dim) {
+#ifdef V_Q8_0
+    const uint ib = row + dim / 32;
+    return float16_t(float(data_v[ib].d) * float(data_v[ib].qs[dim % 32]));
+#else
+    return data_v[row + dim];
+#endif
+}
 
 void main() {
     const float NEG_INF = uintBitsToFloat(0xff800000);
@@ -115,8 +148,8 @@ void main() {
             const uint col = idx / HEAD_SIZE;
             const uint dim = idx % HEAD_SIZE;
             const uint key = block_key[col];
-            kt_sh[dim * BK + col] = key != NONE ? data_k[k_base + key * p.nbk1 + dim] : float16_t(0.0);
-            v_sh[idx] = key != NONE ? data_v[v_base + key * p.nbv1 + dim] : float16_t(0.0);
+            kt_sh[dim * BK + col] = key != NONE ? k_at(k_base + key * p.nbk1, dim) : float16_t(0.0);
+            v_sh[idx] = key != NONE ? v_at(v_base + key * p.nbv1, dim) : float16_t(0.0);
         }
         barrier();
 

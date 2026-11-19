@@ -5074,16 +5074,27 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             CREATE_SEL_GATHER(GGML_TYPE_Q5_1, q5_1)
             CREATE_SEL_GATHER(GGML_TYPE_IQ4_NL, iq4_nl)
 #undef CREATE_SEL_GATHER
-            static const char * sel_names[3] = { "flash_attn_sel_f16_gqa4", "flash_attn_sel_f16_gqa8", "flash_attn_sel_f16_gqa12" };
+            // [K q8_0][V q8_0]: the f16 / q8_0 combinations of K and V
+            static const char * sel_names[2][2][3] = {
+                { { "flash_attn_sel_f16_f16_gqa4",  "flash_attn_sel_f16_f16_gqa8",  "flash_attn_sel_f16_f16_gqa12" },
+                  { "flash_attn_sel_f16_q8_0_gqa4", "flash_attn_sel_f16_q8_0_gqa8", "flash_attn_sel_f16_q8_0_gqa12" } },
+                { { "flash_attn_sel_q8_0_f16_gqa4", "flash_attn_sel_q8_0_f16_gqa8", "flash_attn_sel_q8_0_f16_gqa12" },
+                  { "flash_attn_sel_q8_0_q8_0_gqa4", "flash_attn_sel_q8_0_q8_0_gqa8", "flash_attn_sel_q8_0_q8_0_gqa12" } } };
+            const void * sel_data[2][2] = { { flash_attn_sel_f16_f16_data, flash_attn_sel_f16_q8_0_data },
+                                            { flash_attn_sel_q8_0_f16_data, flash_attn_sel_q8_0_q8_0_data } };
+            const size_t sel_len[2][2] = { { flash_attn_sel_f16_f16_len, flash_attn_sel_f16_q8_0_len },
+                                           { flash_attn_sel_q8_0_f16_len, flash_attn_sel_q8_0_q8_0_len } };
+            for (uint32_t kv = 0; kv < 4; ++kv)
             for (uint32_t i = 0; i < 3; ++i) {
+                const uint32_t kq = kv / 2, vq = kv % 2;
                 const uint32_t gqa = 4 * (i + 1);
                 // shared memory: Q (1 KiB per head), a K and a V block (16 KiB each), P and the block's keys:
                 // 46,720 bytes at GQA 12 (the selection row is read from the pre-pass output, not kept here)
                 const uint32_t sel_shmem = 4 * gqa * 256 + 2 * 2 * 256 * 32 + 4 * gqa * 32 + 4 * 32;
                 if (64 * gqa <= device->properties.limits.maxComputeWorkGroupInvocations &&
                     sel_shmem <= device->properties.limits.maxComputeSharedMemorySize) {
-                    ggml_vk_create_pipeline(device, device->pipeline_flash_attn_sel_f16[i],
-                        sel_names[i], flash_attn_sel_f16_len, flash_attn_sel_f16_data, "main", 5,
+                    ggml_vk_create_pipeline(device, device->pipeline_flash_attn_sel[kq][vq][i],
+                        sel_names[kq][vq][i], sel_len[kq][vq], sel_data[kq][vq], "main", 5,
                         sizeof(vk_op_flash_attn_sel_push_constants), {1, 1, 1}, {64 * gqa, 64, gqa}, 1, true, true, 64);
                 }
             }
@@ -5093,10 +5104,20 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             if (device->subgroup_ballot && device->coopmat_support && device->coopmat_support_16x16x16_f32acc &&
                 device->vendor_id == VK_VENDOR_ID_AMD && device->architecture == AMD_RDNA3 &&
                 device->driver_id == vk::DriverId::eMesaRadv) {
-                static const char * sel_cm_names[3] = { "flash_attn_sel_cm_f16_gqa4", "flash_attn_sel_cm_f16_gqa8", "flash_attn_sel_cm_f16_gqa12" };
+                static const char * sel_cm_names[2][2][3] = {
+                    { { "flash_attn_sel_cm_f16_f16_gqa4",  "flash_attn_sel_cm_f16_f16_gqa8",  "flash_attn_sel_cm_f16_f16_gqa12" },
+                      { "flash_attn_sel_cm_f16_q8_0_gqa4", "flash_attn_sel_cm_f16_q8_0_gqa8", "flash_attn_sel_cm_f16_q8_0_gqa12" } },
+                    { { "flash_attn_sel_cm_q8_0_f16_gqa4", "flash_attn_sel_cm_q8_0_f16_gqa8", "flash_attn_sel_cm_q8_0_f16_gqa12" },
+                      { "flash_attn_sel_cm_q8_0_q8_0_gqa4", "flash_attn_sel_cm_q8_0_q8_0_gqa8", "flash_attn_sel_cm_q8_0_q8_0_gqa12" } } };
+                const void * sel_cm_data[2][2] = { { flash_attn_sel_cm_f16_f16_data, flash_attn_sel_cm_f16_q8_0_data },
+                                                   { flash_attn_sel_cm_q8_0_f16_data, flash_attn_sel_cm_q8_0_q8_0_data } };
+                const size_t sel_cm_len[2][2] = { { flash_attn_sel_cm_f16_f16_len, flash_attn_sel_cm_f16_q8_0_len },
+                                                  { flash_attn_sel_cm_q8_0_f16_len, flash_attn_sel_cm_q8_0_q8_0_len } };
+                for (uint32_t kv = 0; kv < 4; ++kv)
                 for (uint32_t i = 0; i < 3; ++i) {
-                    ggml_vk_create_pipeline(device, device->pipeline_flash_attn_sel_cm_f16[i],
-                        sel_cm_names[i], flash_attn_sel_cm_f16_len, flash_attn_sel_cm_f16_data, "main", 5,
+                    const uint32_t kq = kv / 2, vq = kv % 2;
+                    ggml_vk_create_pipeline(device, device->pipeline_flash_attn_sel_cm[kq][vq][i],
+                        sel_cm_names[kq][vq][i], sel_cm_len[kq][vq], sel_cm_data[kq][vq], "main", 5,
                         sizeof(vk_op_flash_attn_sel_push_constants), {1, 1, 1}, {4 * (i + 1)}, 1, true, true, 64);
                 }
             }
@@ -11231,10 +11252,11 @@ static vk_pipeline ggml_vk_flash_attn_sel_pipeline(const vk_device & device, con
         ggml_nbytes(q) / sizeof(float) > UINT32_MAX || ggml_nbytes(op) / sizeof(float) > UINT32_MAX) {
         return nullptr;
     }
+    // the f16 kernel stands for all four K/V variants (created together); ggml_vk_flash_attn_sel picks the one it runs
     switch (q->ne[2] / k->ne[2]) {
-        case 4:  return device->pipeline_flash_attn_sel_f16[0];
-        case 8:  return device->pipeline_flash_attn_sel_f16[1];
-        case 12: return device->pipeline_flash_attn_sel_f16[2];
+        case 4:  return device->pipeline_flash_attn_sel[0][0][0];
+        case 8:  return device->pipeline_flash_attn_sel[0][0][1];
+        case 12: return device->pipeline_flash_attn_sel[0][0][2];
         default: return nullptr;
     }
 }
@@ -11264,15 +11286,28 @@ static bool ggml_vk_flash_attn_sel(ggml_backend_vk_context * ctx, vk_context & s
     const uint32_t list_stride = ROUNDUP_POW2(n_sel, 64u);
     const size_t list_size = ((size_t) N * NS * list_stride + (size_t) N * NS) * sizeof(uint32_t);
 
-    // A quantized K or V goes to f16 in prealloc_x first. Prefill dequantizes the whole tensor once (a cell is read by
-    // many queries); few queries copy only the listed cells into compact rows.
-    const bool dequant = k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16;
+    // f16 and q8_0 K/V are read by the kernels as they are (q8_0 is dequantized in the kernel). Another quantized type
+    // goes to f16 in prealloc_x first: prefill dequantizes the whole tensor once (a cell is read by many queries), few
+    // queries copy only the listed cells into compact rows.
+    const bool k_q8 = k->type == GGML_TYPE_Q8_0;
+    const bool v_q8 = v->type == GGML_TYPE_Q8_0;
+    const bool dequant = !((k->type == GGML_TYPE_F16 || k_q8) && (v->type == GGML_TYPE_F16 || v_q8));
+    const int kq = !dequant && k_q8;
+    const int vq = !dequant && v_q8;
     const uint64_t compact_rows = (uint64_t) N * NS * list_stride;
     const bool gather = dequant && compact_rows * k->ne[2] * 256 <= UINT32_MAX && compact_rows < (uint64_t) k->ne[1] * NS;
-    // f16 element strides of what the kernels read, and the bytes of each f16 copy (0 = read the tensor itself)
+    // element strides of what the kernels read (q8_0: blocks), and the bytes of each f16 copy (0 = read the tensor itself)
     uint32_t sk[3], sv[3];
     size_t k_f16_sz = 0, v_f16_sz = 0;
     auto f16_view = [&](const ggml_tensor * t, uint32_t * st, size_t & sz) {
+        if (!dequant) {
+            const size_t ts = ggml_type_size(t->type);
+            for (int i = 0; i < 3; ++i) {
+                st[i] = (uint32_t) (t->nb[i + 1] / ts);
+            }
+            sz = 0;
+            return;
+        }
         if (gather) {
             st[0] = (uint32_t) (t->ne[2] * D); st[1] = D; st[2] = 0;
             sz = compact_rows * t->ne[2] * D * sizeof(ggml_fp16_t);
@@ -11292,13 +11327,15 @@ static bool ggml_vk_flash_attn_sel(ggml_backend_vk_context * ctx, vk_context & s
         GGML_ASSERT(std::max(k_f16_sz, v_f16_sz) <= ctx->device->properties.limits.maxStorageBufferRange);
     }
 
-    // the WMMA kernel reads K and V rows in 16-byte pieces
+    // the WMMA kernel reads f16 K and V rows in 16-byte pieces (q8_0 rows in 16-bit words)
     const int gqa_idx = (int) (q->ne[2] / k->ne[2]) / 4 - 1;
-    vk_pipeline pipeline_cm = ctx->device->pipeline_flash_attn_sel_cm_f16[gqa_idx];
+    pipeline = ctx->device->pipeline_flash_attn_sel[kq][vq][gqa_idx];
+    GGML_ASSERT(pipeline != nullptr);
+    vk_pipeline pipeline_cm = ctx->device->pipeline_flash_attn_sel_cm[kq][vq][gqa_idx];
     bool use_cm = pipeline_cm != nullptr &&
-        (k_f16_sz ? 0 : k_buf.offset) % 16 == 0 && (v_f16_sz ? v_f16_off : v_buf.offset) % 16 == 0;
+        (kq || (k_f16_sz ? 0 : k_buf.offset) % 16 == 0) && (vq || (v_f16_sz ? v_f16_off : v_buf.offset) % 16 == 0);
     for (int i = 0; i < 3; ++i) {
-        use_cm = use_cm && sk[i] % 8 == 0 && sv[i] % 8 == 0;
+        use_cm = use_cm && (kq || sk[i] % 8 == 0) && (vq || sv[i] % 8 == 0);
     }
     // one workgroup per (query, split, K/V head) on x
     use_cm = use_cm && (uint64_t) q->ne[1] * k->ne[2] * CEIL_DIV(ids->ne[0], 32) <= ctx->device->properties.limits.maxComputeWorkGroupCount[0];

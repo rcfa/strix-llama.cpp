@@ -1020,14 +1020,22 @@ void process_shaders() {
 #endif
 #endif // GGML_USE_EXL3
     string_to_spv("flash_attn_top_k_f16", "flash_attn_top_k.comp", {});
-    string_to_spv("flash_attn_sel_f16", "flash_attn_sel.comp", {});
+    // maskless selected-key FA: K and V each f16 or q8_0 (q8_0 is dequantized in the kernel)
+    for (const std::string k : {"f16", "q8_0"}) {
+        for (const std::string v : {"f16", "q8_0"}) {
+            std::map<std::string, std::string> defines;
+            if (k == "q8_0") { defines["K_Q8_0"] = "1"; }
+            if (v == "q8_0") { defines["V_Q8_0"] = "1"; }
+            string_to_spv("flash_attn_sel_" + k + "_" + v, "flash_attn_sel.comp", defines);
+#if defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
+            string_to_spv("flash_attn_sel_cm_" + k + "_" + v, "flash_attn_sel_cm.comp", defines);
+#endif
+        }
+    }
     string_to_spv("flash_attn_sel_prep", "flash_attn_sel_prep.comp", {});
     for (const std::string t : {"f16", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "iq4_nl"}) {
         string_to_spv("flash_attn_sel_gather_" + t, "flash_attn_sel_gather.comp", {{"DATA_A_" + to_uppercase(t), "1"}});
     }
-#if defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
-    string_to_spv("flash_attn_sel_cm_f16", "flash_attn_sel_cm.comp", {});
-#endif
 #if defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
     string_to_spv("flash_attn_top_k_cm_f16", "flash_attn_top_k_cm.comp", {});
 #endif
