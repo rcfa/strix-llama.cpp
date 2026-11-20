@@ -19859,18 +19859,34 @@ static int64_t ggml_vk_conv_tail_view_col(const ggml_tensor * t, const ggml_tens
     return (col >= 0 && col + H <= cc->ne[0]) ? col : -1;
 }
 
-// the conv-state copies: a tail view, a CONT of one, or a CPY of either
+// the rollback snapshots (#31660): a [H, Kw, C, S] view of Kw overlapping H-column windows one column apart, stored
+// by one SET_ROWS; returns the first column, or -1
+static int64_t ggml_vk_conv_window_view_col(const ggml_tensor * t, const ggml_tensor * cc, int64_t H) {
+    if (t->op != GGML_OP_VIEW || t->view_src != cc || t->type != GGML_TYPE_F32 ||
+        t->ne[0] != H || t->ne[1] < 1 || t->ne[2] != cc->ne[1] || t->ne[3] != cc->ne[2] ||
+        t->nb[0] != sizeof(float) || t->nb[1] != sizeof(float) || t->nb[2] != cc->nb[1] || t->nb[3] != cc->nb[2] ||
+        t->view_offs % sizeof(float) != 0) {
+        return -1;
+    }
+    const int64_t col = (int64_t) (t->view_offs / sizeof(float));
+    return (col >= 0 && col + t->ne[1] - 1 + H <= cc->ne[0]) ? col : -1;
+}
+
+// the conv-state copies: a tail view, a CONT of one, or a CPY of either; or the rollback windows and their SET_ROWS
 static bool ggml_vk_conv_tail_reader(const ggml_tensor * t, const ggml_tensor * cc, int64_t H, int64_t & tail_from) {
     const ggml_tensor * v = nullptr;
     if (t->op == GGML_OP_VIEW) {
         v = t;
-    } else if (t->op == GGML_OP_CONT || t->op == GGML_OP_CPY) {
+    } else if (t->op == GGML_OP_CONT || t->op == GGML_OP_CPY || t->op == GGML_OP_SET_ROWS) {
         v = t->src[0];
         if (v && t->op == GGML_OP_CPY && v->op == GGML_OP_CONT) {
             v = v->src[0];
         }
     }
-    const int64_t col = v ? ggml_vk_conv_tail_view_col(v, cc, H) : -1;
+    int64_t col = v && t->op != GGML_OP_SET_ROWS ? ggml_vk_conv_tail_view_col(v, cc, H) : -1;
+    if (col < 0 && v && t->op != GGML_OP_CONT && t->op != GGML_OP_CPY) {
+        col = ggml_vk_conv_window_view_col(v, cc, H);
+    }
     if (col < 0) {
         return false;
     }
