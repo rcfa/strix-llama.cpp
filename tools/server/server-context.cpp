@@ -35,9 +35,12 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <iomanip>
+#include <limits>
 #include <memory>
 #include <filesystem>
 #include <random>
+#include <sstream>
 #include <utility>
 #include <fstream>
 
@@ -51,6 +54,79 @@
 #endif
 
 constexpr int HTTP_POLLING_SECONDS = 1;
+
+static void server_prompt_cache_key_add_file(
+        std::ostringstream & key,
+        const char * label,
+        const std::string & path) {
+    key << label << '=' << path.size() << ':' << path;
+    if (path.empty()) {
+        key << "\n";
+        return;
+    }
+
+    std::error_code ec;
+    const auto absolute_path = std::filesystem::absolute(path, ec);
+    if (!ec) {
+        const std::string normalized = absolute_path.lexically_normal().string();
+        key << '|' << normalized.size() << ':' << normalized;
+    }
+
+    ec.clear();
+    const auto size = std::filesystem::file_size(path, ec);
+    key << "|size=" << (ec ? 0 : size);
+
+    ec.clear();
+    const auto modified = std::filesystem::last_write_time(path, ec);
+    key << "|mtime=" << static_cast<long long>(ec ? 0 : modified.time_since_epoch().count()) << "\n";
+}
+
+static std::string server_prompt_cache_key(
+        const common_params & params,
+        const llama_context * ctx_tgt,
+        const llama_context * ctx_dft) {
+    std::ostringstream key;
+    // the state format, not the build commit: entries survive an upgrade (a build that changes the state layout
+    // bumps LLAMA_STATE_SEQ_VERSION / LLAMA_SESSION_VERSION, and llama_state_seq_set_data checks the sizes)
+    // format 3: the batch sizes (-b, -ub) are not part of the key - they do not change a saved state
+    key << "format=3\n";
+    key << "state_seq_version=" << LLAMA_STATE_SEQ_VERSION << "\n";
+    key << "session_version=" << LLAMA_SESSION_VERSION << "\n";
+    server_prompt_cache_key_add_file(key, "model", params.model.path);
+    server_prompt_cache_key_add_file(key, "draft", params.speculative.draft.mparams.path);
+    server_prompt_cache_key_add_file(key, "mmproj", params.mmproj.path);
+
+    key << "n_ctx_tgt=" << llama_n_ctx(ctx_tgt) << "\n";
+    key << "n_ctx_dft=" << (ctx_dft ? llama_n_ctx(ctx_dft) : 0) << "\n";
+    key << "n_parallel=" << params.n_parallel << "\n";
+    key << "cache_type_k=" << (int) params.cache_type_k << "\n";
+    key << "cache_type_v=" << (int) params.cache_type_v << "\n";
+    key << "draft_cache_type_k=" << (int) params.speculative.draft.cache_type_k << "\n";
+    key << "draft_cache_type_v=" << (int) params.speculative.draft.cache_type_v << "\n";
+    key << "swa_full=" << params.swa_full << "\n";
+    key << "kv_unified=" << params.kv_unified << "\n";
+    key << "flash_attn=" << (int) params.flash_attn_type << "\n";
+    key << "no_kv_offload=" << params.no_kv_offload << "\n";
+
+    key << std::hexfloat;
+    key << "rope_freq_base=" << params.rope_freq_base << "\n";
+    key << "rope_freq_scale=" << params.rope_freq_scale << "\n";
+    key << "yarn_ext_factor=" << params.yarn_ext_factor << "\n";
+    key << "yarn_attn_factor=" << params.yarn_attn_factor << "\n";
+    key << "yarn_beta_fast=" << params.yarn_beta_fast << "\n";
+    key << "yarn_beta_slow=" << params.yarn_beta_slow << "\n";
+    key << "yarn_orig_ctx=" << params.yarn_orig_ctx << "\n";
+    for (const auto & lora : params.lora_adapters) {
+        server_prompt_cache_key_add_file(key, "lora", lora.path);
+        key << "lora_scale=" << lora.scale << "\n";
+    }
+    for (const auto & control_vector : params.control_vectors) {
+        server_prompt_cache_key_add_file(key, "control_vector", control_vector.fname);
+        key << "control_vector_strength=" << control_vector.strength << "\n";
+    }
+
+    return key.str();
+}
 
 static common_speculative_output_limits server_output_limits(const common_params & params) {
     if (!params.mmproj.path.empty()) {
@@ -322,6 +398,9 @@ struct server_slot {
     // used to determine the slot that has been used the longest
     int64_t t_last_used = -1;
 
+    // the conversation_id of the request that left the slot's tokens, empty if unknown
+    std::string conversation_id;
+
     // generation props
     int32_t n_ctx   = 0;  // context size per slot
     int32_t n_keep  = 0;
@@ -370,19 +449,47 @@ struct server_slot {
             return false;
         }
 
+        if (cur->data.is_disk()) {
+            GGML_ASSERT(cur->data.mapping != nullptr);
+
+            const size_t n_tgt = server_prompt_state_get_staged(ctx_tgt, cur->data.mapping, cur_size_tgt, id);
+            if (n_tgt != cur_size_tgt) {
+                SLT_WRN(*this, "failed to save target prompt state: expected %zu bytes, wrote %zu\n", cur_size_tgt, n_tgt);
+                prompt_cache.discard(cur);
+                return false;
+            }
+            if (ctx_dft) {
+                const size_t n_dft = server_prompt_state_get_staged(ctx_dft, cur->data.mapping + cur_size_tgt, cur_size_dft, id);
+                if (n_dft != cur_size_dft) {
+                    SLT_WRN(*this, "failed to save draft prompt state: expected %zu bytes, wrote %zu\n", cur_size_dft, n_dft);
+                    prompt_cache.discard(cur);
+                    return false;
+                }
+            }
+
+            return prompt_cache.commit(cur);
+        }
+
         const size_t n_tgt = llama_state_seq_get_data_ext(ctx_tgt, cur->data.main.data(), cur_size_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
         const size_t n_dft = ctx_dft ? llama_state_seq_get_data_ext(ctx_dft, cur->data.drft.data(), cur_size_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE) : 0;
         if (n_tgt != cur_size_tgt || n_dft != cur_size_dft) {
             SLT_ERR(*this, "%s", "failed to save complete prompt state\n");
-            prompt_cache.states.pop_back();
+            prompt_cache.discard(cur);
             return false;
         }
 
         return true;
     }
 
-    bool prompt_load(server_prompt_cache & prompt_cache, const server_tokens & tokens) {
-        bool res = prompt_cache.load(prompt, tokens, ctx_tgt, ctx_dft, id);
+    bool prompt_load(
+            server_prompt_cache & prompt_cache,
+            const server_tokens & tokens,
+            bool cache_prompt,
+            bool needs_checkpoint,
+            int32_t n_swa,
+            float slot_prompt_similarity) {
+        bool res = prompt_cache.load(
+            prompt, tokens, ctx_tgt, ctx_dft, id, cache_prompt, needs_checkpoint, n_swa, slot_prompt_similarity);
         if (!res) {
             SLT_WRN(*this, "%s", "failed to load prompt from cache\n");
         }
@@ -399,6 +506,7 @@ struct server_slot {
         }
 
         prompt.clear();
+        conversation_id.clear();
     }
 
     std::vector<common_adapter_lora_info> lora;
@@ -865,6 +973,10 @@ struct server_slot {
             {"is_processing", is_processing()},
         };
 
+        if (!conversation_id.empty()) {
+            res["conversation_id"] = conversation_id;
+        }
+
         const auto & ptask = task ? task : task_prev;
 
         if (ptask) {
@@ -1232,6 +1344,26 @@ private:
     bool sleeping = false;
 
     int64_t t_last_load_progress_ms = 0;
+
+    // on a clean exit: a running request ends with the server, so only idle slots are saved
+    void save_slots_to_cache() {
+        if (sleeping || !prompt_cache || prompt_cache->cache_dir.empty()) {
+            return;
+        }
+        int n_saved = 0;
+        size_t n_tokens = 0;
+        for (auto & slot : slots) {
+            if (slot.is_processing() || slot.prompt.tokens.empty()) {
+                continue;
+            }
+            if (slot.prompt_save(*prompt_cache)) {
+                n_saved++;
+                n_tokens += slot.prompt.tokens.size();
+            }
+        }
+        prompt_cache->update();
+        SRV_INF("saved %d idle slot(s) (%zu tokens) to the disk prompt cache before exit\n", n_saved, n_tokens);
+    }
 
     void destroy() {
         spec.reset();
@@ -1703,6 +1835,7 @@ private:
 
         // Necessary similarity of prompt for slot selection
         slot_sched.slot_prompt_similarity = params_base.slot_prompt_similarity;
+        slot_sched.slot_keep_min          = params_base.slot_keep_min;
 
         const int n_ctx_max = n_ctx_model();
 
@@ -1863,17 +1996,51 @@ private:
             params_base.cache_idle_slots = false;
         }
 
-        if (params_base.cache_ram_mib != 0) {
-            if (params_base.cache_ram_mib < 0) {
-                SRV_TRC("prompt cache is enabled, size limit: %s\n", "no limit");
-            } else {
-                SRV_TRC("prompt cache is enabled, size limit: %d MiB\n", params_base.cache_ram_mib);
-            }
-            SRV_TRC("%s", "use `--cache-ram 0` to disable the prompt cache\n");
+        const bool cache_dir_enabled = !params_base.cache_dir_path.empty() && params_base.cache_dir_max_mib != 0;
+        const bool prompt_cache_enabled = cache_dir_enabled || params_base.cache_ram_mib != 0;
 
-            prompt_cache = std::make_unique<server_prompt_cache>(params_base.cache_ram_mib, n_ctx);
+        if (prompt_cache_enabled) {
+            const int32_t cache_limit_mib = cache_dir_enabled ? params_base.cache_dir_max_mib : params_base.cache_ram_mib;
+            const size_t cache_limit_tokens = cache_dir_enabled ? 0 : n_ctx;
+
+            if (cache_dir_enabled) {
+                std::error_code ec;
+                const bool cache_dir_created = std::filesystem::create_directories(params_base.cache_dir_path, ec);
+                const bool cache_dir_valid = !ec && std::filesystem::is_directory(params_base.cache_dir_path, ec);
+                if (ec || !cache_dir_valid) {
+                    SRV_ERR("failed to create prompt cache directory %s: %s\n",
+                            params_base.cache_dir_path.c_str(), ec ? ec.message().c_str() : "path is not a directory");
+                    return false;
+                }
+                // cached entries hold prompts: a directory we create is owner-only, an existing one is left as is
+                if (cache_dir_created) {
+                    std::filesystem::permissions(params_base.cache_dir_path, std::filesystem::perms::owner_all,
+                            std::filesystem::perm_options::replace, ec);
+                } else {
+                    const auto perms = std::filesystem::status(params_base.cache_dir_path, ec).permissions();
+                    if (!ec && (perms & (std::filesystem::perms::group_all | std::filesystem::perms::others_all)) != std::filesystem::perms::none) {
+                        SRV_WRN("prompt cache directory %s is accessible to other users\n", params_base.cache_dir_path.c_str());
+                    }
+                }
+                SRV_TRC("prompt cache is enabled on disk: %s\n", params_base.cache_dir_path.c_str());
+            } else {
+                SRV_TRC("%s", "prompt cache is enabled in RAM\n");
+            }
+
+            if (cache_limit_mib < 0) {
+                SRV_TRC("prompt cache size limit: %s\n", "no limit");
+            } else {
+                SRV_TRC("prompt cache size limit: %d MiB\n", cache_limit_mib);
+            }
+
+            prompt_cache = std::make_unique<server_prompt_cache>(
+                cache_limit_mib,
+                cache_limit_tokens,
+                cache_dir_enabled ? params_base.cache_dir_path : "",
+                cache_dir_enabled ? server_prompt_cache_key(params_base, ctx_tgt, ctx_dft) : "",
+                mctx != nullptr);
         } else {
-            SRV_TRC("%s", "prompt cache is disabled - use `--cache-ram N` to enable it\n");
+            SRV_TRC("%s", "prompt cache is disabled - use `--cache-ram N` or `--cache-dir PATH` to enable it\n");
         }
         SRV_TRC("%s", "for more info see https://github.com/ggml-org/llama.cpp/pull/16391\n");
 
@@ -1949,8 +2116,8 @@ private:
         metrics.init();
 
         if (params_base.cache_idle_slots) {
-            if (params_base.cache_ram_mib == 0) {
-                SRV_WRN("%s", "--cache-idle-slots requires --cache-ram, disabling\n");
+            if (!prompt_cache) {
+                SRV_WRN("%s", "--cache-idle-slots requires a prompt cache, disabling\n");
                 params_base.cache_idle_slots = false;
             } else {
                 if (params_base.kv_unified) {
@@ -2093,7 +2260,7 @@ private:
     std::vector<server_slot_info> get_slot_infos() const {
         std::vector<server_slot_info> res;
         for (const server_slot & slot : slots) {
-            res.push_back({ slot.id, slot.task.get(), slot.is_processing(), slot.t_last_used, &slot.prompt });
+            res.push_back({ slot.id, slot.task.get(), slot.is_processing(), slot.t_last_used, &slot.prompt, &slot.conversation_id });
         }
         return res;
     }
@@ -2106,24 +2273,54 @@ private:
 
         slot.prompt_save(*prompt_cache);
 
-        bool loaded = slot.prompt_load(*prompt_cache, task.tokens);
+        const bool needs_checkpoint =
+            ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+            ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS   ||
+            n_swa > 0;
+        auto load = [&]() {
+            return slot.prompt_load(
+                *prompt_cache,
+                task.tokens,
+                task.params.cache_prompt,
+                needs_checkpoint,
+                n_swa,
+                slot_sched.slot_prompt_similarity);
+        };
+        bool loaded = load();
 
         if (!loaded) {
-            // a failed restore leaves the sequence in an unknown state, so its tokens no longer describe it
+            // the failed restore has emptied the slot's sequence, so its tokens no longer describe it
             slot.prompt_clear();
 
-            // make room: purge idle slots, least recently used first, each saved to the cache.
-            // A save can evict the entry we want, so stop then.
+            // a full unified KV pool has no free cells to restore into
+            // purge idle slots, least recently used first and each saved to the cache, until the restore fits
+            // those saves can evict the entry that is to be restored: stop then, purging more has no purpose
             const uint64_t id_wanted = prompt_cache->id_failed;
 
             while (!loaded && prompt_cache->contains(id_wanted) && try_clear_idle_slots()) {
-                loaded = slot.prompt_load(*prompt_cache, task.tokens);
+                loaded = load();
             }
 
             if (!loaded) {
                 slot.prompt_clear();
+
+                // no other slot is busy, so the pool was as empty as it gets: the entry itself is bad
+                const bool any_busy = std::any_of(slots.begin(), slots.end(), [](const server_slot & other) {
+                    return other.is_processing();
+                });
+                if (!any_busy) {
+                    prompt_cache->discard_unrestorable(id_wanted);
+                }
             }
         }
+
+        // checkpoints restored from a disk entry are new to --ctx-checkpoints-ram, like the ones a task creates
+        if (loaded) {
+            for (const auto & ckpt : prompt_cache->restored_from_disk) {
+                hold_checkpoint(ckpt);
+            }
+        }
+        prompt_cache->restored_from_disk.clear();
 
         prompt_cache->update();
 
@@ -2378,6 +2575,7 @@ private:
         // the per-request limit takes priority over the global one
         slot.n_predict_max = task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict;
 
+        slot.conversation_id = task.conversation_id;
         slot.task = std::make_unique<const server_task>(std::move(task));
 
         if (slot.task->type == SERVER_TASK_TYPE_TTS) {
@@ -3617,7 +3815,6 @@ private:
                         send_error(task, "Unable to save slot: incomplete context checkpoints", ERROR_TYPE_SERVER);
                         break;
                     }
-
                     size_t nwrite_dft = 0;
                     if (!save_slot_draft(filepath, *slot, nwrite_dft)) {
                         send_error(task, "Unable to save slot: incomplete draft state", ERROR_TYPE_SERVER);
@@ -3683,6 +3880,7 @@ private:
 
                         slot->prompt.clear();
                         slot->prompt.tokens = std::move(restored);
+                        slot->conversation_id.clear();
                     } catch (const std::exception & err) {
                         slot->prompt_clear();
                         send_error(task, std::string("Unable to restore slot: ") + err.what(), ERROR_TYPE_INVALID_REQUEST);
@@ -5841,6 +6039,10 @@ void server_context::terminate() {
     impl->queue_tasks.terminate();
 }
 
+void server_context::save_slots_to_cache() {
+    impl->save_slots_to_cache();
+}
+
 llama_context * server_context::get_llama_context() const {
     return impl->ctx_tgt;
 }
@@ -6024,6 +6226,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task.apply_chat_session(chat_session);
 
             task.id_slot = json_value(data, "id_slot", -1);
+            task.slot_match_skip = json_value(data, "slot_match_skip", 0);
+            task.conversation_id = json_value(data, "conversation_id", std::string());
             sse_ping_interval = task.params.sse_ping_interval;
 
             // OAI-compat

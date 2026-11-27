@@ -739,6 +739,9 @@ struct common_params {
     int32_t ctx_checkpoints_ram_mib = 8192; // with ctx_checkpoints_dir: checkpoint memory kept before the oldest are written
     int32_t cache_ram_mib       = 8192;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
     bool    cache_ram_explicit  = false; // set by --cache-ram, decision models disable the cache otherwise
+    int32_t cache_dir_max_mib   = 32768; // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
+
+    std::string cache_dir_path;
 
     // llama-connect params
     bool        server_connect      = false;
@@ -809,6 +812,7 @@ struct common_params {
     bool media_allow_private_urls = false; // allow http(s) media URLs on local or private addresses
 
     float slot_prompt_similarity = 0.1f;
+    float slot_keep_min          = 0.0f; // the slot chosen by similarity must keep this fraction, else an empty slot is used
 
     // batched-bench params
     bool is_pp_shared   = false;

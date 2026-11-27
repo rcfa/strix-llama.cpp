@@ -125,6 +125,8 @@ class ServerProcess:
     ctx_checkpoints_dir: str | None = None
     ctx_checkpoints_ram: int | None = None
     override_kv: str | None = None
+    cache_dir: str | None = None
+    cache_dir_max: int | None = None
     no_cache_idle_slots: bool = False
     log_path: str | None = None
     ui_mcp_proxy: bool = False
@@ -315,6 +317,10 @@ class ServerProcess:
             server_args.extend(["--ctx-checkpoints-ram", self.ctx_checkpoints_ram])
         if self.override_kv:
             server_args.extend(["--override-kv", self.override_kv])
+        if self.cache_dir is not None:
+            server_args.extend(["--cache-dir", self.cache_dir])
+        if self.cache_dir_max is not None:
+            server_args.extend(["--cache-dir-max", self.cache_dir_max])
         if self.no_cache_idle_slots:
             server_args.append("--no-cache-idle-slots")
         if self.ui_mcp_proxy:
